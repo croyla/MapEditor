@@ -41,3 +41,6 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+/sample.geojson
+/.intellijPlatform/coroutines-javaagent-legacy.jar
+/.intellijPlatform/self-update.lock
