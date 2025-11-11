@@ -1,0 +1,42 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <!-- Unique identifier of the plugin. It should be FQN. It cannot be changed between the plugin versions. -->
+    <id>com.github.croyla.MapEditor</id>
+
+    <!-- Public plugin name should be written in Title Case.
+         Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-name -->
+    <name>MapEditor</name>
+
+    <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
+    <vendor url="https://www.github.com/croyla">Aayush Rai</vendor>
+
+    <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
+         Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-description -->
+    <description><![CDATA[
+        A visual map editor for JetBrains IDEs. Edit GIS files with a split view showing both the raw file content and an interactive map with MapLibre GL JS.<br>
+        <br>
+        Features:<br>
+        - Split view editor with raw content on one side and interactive map on the other<br>
+        - Bidirectional synchronization between raw content and map<br>
+        - Draw Points, LineStrings, and Polygons<br>
+        - Edit feature geometries and properties<br>
+        - Delete features<br>
+        - MapLibre GL JS with OSM base map<br>
+        Supported file types:<br>
+        - GeoJSON (.geojson)<br>
+    ]]></description>
+
+    <!-- Product and plugin compatibility requirements.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <!-- Extension points defined by the plugin.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Startup activity to associate .geojson with JSON -->
+        <postStartupActivity implementation="com.github.croyla.mapeditor.GeoJsonFileNameMatcherFactory"/>
+
+        <!-- Register custom editor provider with higher priority -->
+        <fileEditorProvider implementation="com.github.croyla.mapeditor.GeoJsonEditorProvider"/>
+    </extensions>
+</idea-plugin>
