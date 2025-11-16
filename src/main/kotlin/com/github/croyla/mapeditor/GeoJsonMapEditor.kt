@@ -1,10 +1,12 @@
 package com.github.croyla.mapeditor
 
-import com.google.gson.Gson
 import com.google.gson.JsonParser
+import com.intellij.ide.ui.LafManager
+import com.intellij.ide.ui.LafManagerListener
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.fileEditor.FileDocumentManager
@@ -12,6 +14,7 @@ import com.intellij.openapi.fileEditor.TextEditor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.jcef.JBCefBrowser
+import com.intellij.ui.jcef.JBCefBrowserBase
 import com.intellij.ui.jcef.JBCefJSQuery
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
@@ -23,23 +26,39 @@ import javax.swing.JPanel
 class GeoJsonMapEditor(
     private val project: Project,
     private val file: VirtualFile,
-    private val textEditor: TextEditor
+    private var textEditor: TextEditor?,
+    parentDisposable: Disposable
 ) : Disposable {
 
     private val panel = JPanel(BorderLayout())
     private val browser: JBCefBrowser = JBCefBrowser()
-    private val gson = Gson()
     private var isUpdatingFromMap = false
     private var isUpdatingFromText = false
+    private var documentListener: DocumentListener? = null
+    private var currentThemeIsDark = isDarkTheme()
 
     val component: JComponent
         get() = panel
 
     init {
+        // Register this disposable with parent
+        com.intellij.openapi.util.Disposer.register(parentDisposable, this)
+
         panel.add(browser.component, BorderLayout.CENTER)
 
-        // Set up JS query for map-to-text updates
-        val jsQuery = JBCefJSQuery.create(browser)
+        // Listen for theme changes
+        ApplicationManager.getApplication().messageBus.connect(this).subscribe(
+            LafManagerListener.TOPIC,
+            LafManagerListener {
+                val newThemeIsDark = isDarkTheme()
+                if (newThemeIsDark != currentThemeIsDark) {
+                    currentThemeIsDark = newThemeIsDark
+                    reloadMapWithNewTheme()
+                }
+            }
+        )
+
+        val jsQuery = JBCefJSQuery.create(browser as JBCefBrowserBase)
         jsQuery.addHandler { geoJsonString ->
             if (!isUpdatingFromText) {
                 updateTextFromMap(geoJsonString)
@@ -47,13 +66,23 @@ class GeoJsonMapEditor(
             null
         }
 
+        // JS query for feature selection (to scroll code to feature)
+        val featureSelectionQuery = JBCefJSQuery.create(browser as JBCefBrowserBase)
+        featureSelectionQuery.addHandler { featureId ->
+            scrollCodeToFeature(featureId)
+            null
+        }
+
         // Load the map HTML
         browser.jbCefClient.addLoadHandler(object : CefLoadHandlerAdapter() {
             override fun onLoadEnd(cefBrowser: CefBrowser?, frame: CefFrame?, httpStatusCode: Int) {
                 if (frame?.isMain == true) {
-                    // Inject the JS query handler
+                    // Inject the JS query handlers
                     this@GeoJsonMapEditor.browser.cefBrowser.executeJavaScript(
-                        "window.updateGeoJsonFromMap = function(geoJson) { ${jsQuery.inject("JSON.stringify(geoJson)")} };",
+                        """
+                        window.updateGeoJsonFromMap = function(geoJson) { ${jsQuery.inject("JSON.stringify(geoJson)")} };
+                        window.notifyFeatureSelected = function(featureId) { ${featureSelectionQuery.inject("featureId")} };
+                        """.trimIndent(),
                         cefBrowser?.url ?: "", 0
                     )
 
@@ -65,15 +94,187 @@ class GeoJsonMapEditor(
 
         browser.loadHTML(getMapHtml())
 
-        // Listen for text editor changes
-        val document = FileDocumentManager.getInstance().getDocument(file)
-        document?.addDocumentListener(object : DocumentListener {
+        // Set up document listener if text editor is available
+        if (textEditor != null) {
+            setupDocumentListener()
+        }
+    }
+
+    fun setTextEditor(editor: TextEditor) {
+        this.textEditor = editor
+        setupDocumentListener()
+    }
+
+    private fun setupDocumentListener() {
+        // Remove old listener if exists
+        documentListener?.let { listener ->
+            val document = FileDocumentManager.getInstance().getDocument(file)
+            document?.removeDocumentListener(listener)
+        }
+
+        // Add new listener
+        val listener = object : DocumentListener {
             override fun documentChanged(event: DocumentEvent) {
                 if (!isUpdatingFromMap) {
                     loadGeoJsonToMap()
                 }
             }
+        }
+        documentListener = listener
+
+        val document = FileDocumentManager.getInstance().getDocument(file)
+        document?.addDocumentListener(listener)
+
+        // Add caret listener to pan map when cursor moves to a feature
+        textEditor?.editor?.caretModel?.addCaretListener(object : com.intellij.openapi.editor.event.CaretListener {
+            override fun caretPositionChanged(event: com.intellij.openapi.editor.event.CaretEvent) {
+                panMapToFeatureAtCursor()
+            }
         })
+    }
+
+    private fun panMapToFeatureAtCursor() {
+        val editor = textEditor?.editor ?: return
+
+        ApplicationManager.getApplication().runReadAction {
+            try {
+                val document = FileDocumentManager.getInstance().getDocument(file) ?: return@runReadAction
+                val offset = editor.caretModel.offset
+                val text = document.text
+
+                // Parse the GeoJSON to find feature boundaries
+                val geoJson = JsonParser.parseString(text)
+                if (!geoJson.isJsonObject) return@runReadAction
+
+                val obj = geoJson.asJsonObject
+                if (!obj.has("type") || obj.get("type").asString != "FeatureCollection") return@runReadAction
+                if (!obj.has("features")) return@runReadAction
+
+                val features = obj.getAsJsonArray("features")
+                if (features.size() == 0) return@runReadAction
+
+                // Find the "features" array position in the text
+                val featuresPos = text.indexOf("\"features\"")
+                if (featuresPos < 0 || offset < featuresPos) return@runReadAction
+
+                // Find the opening bracket of the features array
+                var arrayStart = text.indexOf('[', featuresPos)
+                if (arrayStart < 0 || offset < arrayStart) return@runReadAction
+
+                // Now find which feature the cursor is in
+                var featureIndex = -1
+                var currentPos = arrayStart + 1
+                var depth = 0
+                var inString = false
+                var escape = false
+
+                for (i in 0 until features.size()) {
+                    // Find the start of this feature object
+                    var featureStart = -1
+                    for (j in currentPos until text.length) {
+                        val c = text[j]
+
+                        if (escape) {
+                            escape = false
+                            continue
+                        }
+
+                        if (c == '\\' && inString) {
+                            escape = true
+                            continue
+                        }
+
+                        if (c == '"' && !escape) {
+                            inString = !inString
+                            continue
+                        }
+
+                        if (inString) continue
+
+                        if (c == '{') {
+                            if (depth == 0) {
+                                featureStart = j
+                            }
+                            depth++
+                        } else if (c == '}') {
+                            depth--
+                            if (depth == 0 && featureStart >= 0) {
+                                // This is the end of the current feature
+                                if (offset >= featureStart && offset <= j) {
+                                    featureIndex = i
+                                    break
+                                }
+                                currentPos = j + 1
+                                break
+                            }
+                        }
+                    }
+
+                    if (featureIndex >= 0) break
+                }
+
+                if (featureIndex >= 0) {
+                    val finalIndex = featureIndex
+                    // Pan map to this feature
+                    ApplicationManager.getApplication().invokeLater {
+                        val jsCode = """
+                            if (window.panToFeatureByIndex) {
+                                window.panToFeatureByIndex($finalIndex);
+                            }
+                        """.trimIndent()
+                        browser.cefBrowser.executeJavaScript(jsCode, browser.cefBrowser.url, 0)
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun scrollCodeToFeature(featureId: String) {
+        ApplicationManager.getApplication().invokeLater {
+            val editor = textEditor?.editor ?: return@invokeLater
+
+            ApplicationManager.getApplication().runReadAction {
+                try {
+                    val document = FileDocumentManager.getInstance().getDocument(file) ?: return@runReadAction
+                    val text = document.text
+
+                    // Search for the feature ID in the text
+                    // Look for "id": "featureId" pattern
+                    val searchPattern = "\"id\":\\s*\"$featureId\""
+                    val regex = Regex(searchPattern)
+                    val match = regex.find(text)
+
+                    if (match != null) {
+                        val idPosition = match.range.first
+
+                        // Find the start of this feature object (previous opening brace)
+                        var featureStart = idPosition
+                        var braceCount = 0
+                        for (i in idPosition downTo 0) {
+                            when (text[i]) {
+                                '}' -> braceCount++
+                                '{' -> {
+                                    if (braceCount == 0) {
+                                        featureStart = i
+                                        break
+                                    }
+                                    braceCount--
+                                }
+                            }
+                        }
+
+                        ApplicationManager.getApplication().invokeLater {
+                            editor.caretModel.moveToOffset(featureStart)
+                            editor.scrollingModel.scrollToCaret(com.intellij.openapi.editor.ScrollType.CENTER)
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
     }
 
     private var updateTimer: javax.swing.Timer? = null
@@ -98,7 +299,7 @@ class GeoJsonMapEditor(
                     """.trimIndent()
 
                     browser.cefBrowser.executeJavaScript(jsCode, browser.cefBrowser.url, 0)
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     // Invalid JSON, skip update
                 } finally {
                     isUpdatingFromText = false
@@ -107,6 +308,12 @@ class GeoJsonMapEditor(
         }.apply {
             isRepeats = false
             start()
+        }
+    }
+
+    private fun reloadMapWithNewTheme() {
+        ApplicationManager.getApplication().invokeLater {
+            browser.loadHTML(getMapHtml())
         }
     }
 
@@ -137,7 +344,7 @@ class GeoJsonMapEditor(
                                     .reformat(psiFile)
                             }
                         }
-                    } catch (e: Exception) {
+                    } catch (_: Exception) {
                         // Reformatting failed, but at least we have pretty JSON
                     }
                 }
@@ -149,483 +356,57 @@ class GeoJsonMapEditor(
         }
     }
 
+    private fun isDarkTheme(): Boolean {
+        val globalScheme = EditorColorsManager.getInstance().globalScheme
+        val backgroundColor = globalScheme.defaultBackground
+        // Calculate luminance to determine if background is dark
+        val luminance = (0.299 * backgroundColor.red + 0.587 * backgroundColor.green + 0.114 * backgroundColor.blue) / 255.0
+        return luminance < 0.5
+    }
+
     private fun getMapHtml(): String {
-        return """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>GeoJSON Map Editor</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-    <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
-    <script src="https://unpkg.com/@mapbox/mapbox-gl-draw@1.4.3/dist/mapbox-gl-draw.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/@mapbox/mapbox-gl-draw@1.4.3/dist/mapbox-gl-draw.css">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-        }
-        #map {
-            width: 100%;
-            height: 100%;
-        }
-        .maplibregl-ctrl-top-left {
-            top: 70px;
-        }
-    </style>
-</head>
-<body>
-    <div class="relative w-full h-full">
-        <!-- Toolbar -->
-        <div class="absolute top-0 left-0 right-0 z-10 bg-white border-b border-gray-200 shadow-sm">
-            <div class="flex items-center gap-2 p-3 flex-wrap">
-                <button id="select-btn" class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 active:bg-blue-600 active:text-white">
-                    Select
-                </button>
-                <button id="point-btn" class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    Point
-                </button>
-                <button id="line-btn" class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    LineString
-                </button>
-                <button id="polygon-btn" class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    Polygon
-                </button>
-                <div class="w-px h-8 bg-gray-300"></div>
-                <button id="delete-btn" class="px-4 py-2 text-sm font-medium text-white bg-red-600 border border-red-600 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
-                    Delete
-                </button>
-            </div>
-        </div>
+        val isDark = isDarkTheme()
 
-        <!-- Map Container -->
-        <div id="map" class="pt-[60px]"></div>
+        // Read HTML template from resources
+        val htmlTemplate = javaClass.getResourceAsStream("/GeoJsonMapRender.html")?.bufferedReader()?.use { it.readText() }
+            ?: throw IllegalStateException("Could not load GeoJsonMapRender.html")
 
-        <!-- Properties Panel -->
-        <div id="properties-panel" class="hidden absolute top-[70px] right-4 w-80 max-h-[calc(100vh-90px)] bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
-            <div class="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50">
-                <h3 class="text-sm font-semibold text-gray-900">Feature Properties</h3>
-                <button id="close-panel" class="text-gray-400 hover:text-gray-600">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                    </svg>
-                </button>
-            </div>
-            <div id="properties-content" class="p-4 overflow-y-auto max-h-[calc(100vh-170px)]"></div>
-        </div>
-    </div>
-
-    <script>
-        let map, draw, currentFeatureCollection;
-        let selectedFeatureId = null;
-
-        function initMap() {
-            // Initialize MapLibre GL map with simpler raster tiles for better performance
-            map = new maplibregl.Map({
-                container: 'map',
-                style: {
-                    version: 8,
-                    sources: {
-                        'raster-tiles': {
-                            type: 'raster',
-                            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-                            tileSize: 256,
-                            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                        }
-                    },
-                    layers: [{
-                        id: 'simple-tiles',
-                        type: 'raster',
-                        source: 'raster-tiles',
-                        minzoom: 0,
-                        maxzoom: 22
-                    }]
-                },
-                center: [0, 20],
-                zoom: 2,
-                fadeDuration: 0,
-                renderWorldCopies: false
-            });
-
-            // Initialize MapBox GL Draw
-            draw = new MapboxDraw({
-                displayControlsDefault: false,
-                controls: {},
-                styles: [
-                    // Point style
-                    {
-                        'id': 'gl-draw-point',
-                        'type': 'circle',
-                        'filter': ['all', ['==', '${'$'}type', 'Point'], ['!=', 'mode', 'static']],
-                        'paint': {
-                            'circle-radius': 6,
-                            'circle-color': '#3b82f6'
-                        }
-                    },
-                    // Line style
-                    {
-                        'id': 'gl-draw-line',
-                        'type': 'line',
-                        'filter': ['all', ['==', '${'$'}type', 'LineString'], ['!=', 'mode', 'static']],
-                        'layout': {
-                            'line-cap': 'round',
-                            'line-join': 'round'
-                        },
-                        'paint': {
-                            'line-color': '#3b82f6',
-                            'line-width': 3
-                        }
-                    },
-                    // Polygon fill
-                    {
-                        'id': 'gl-draw-polygon-fill',
-                        'type': 'fill',
-                        'filter': ['all', ['==', '${'$'}type', 'Polygon'], ['!=', 'mode', 'static']],
-                        'paint': {
-                            'fill-color': '#3b82f6',
-                            'fill-opacity': 0.2
-                        }
-                    },
-                    // Polygon outline
-                    {
-                        'id': 'gl-draw-polygon-stroke',
-                        'type': 'line',
-                        'filter': ['all', ['==', '${'$'}type', 'Polygon'], ['!=', 'mode', 'static']],
-                        'layout': {
-                            'line-cap': 'round',
-                            'line-join': 'round'
-                        },
-                        'paint': {
-                            'line-color': '#3b82f6',
-                            'line-width': 3
-                        }
-                    },
-                    // Vertex points
-                    {
-                        'id': 'gl-draw-polygon-and-line-vertex-active',
-                        'type': 'circle',
-                        'filter': ['all', ['==', 'meta', 'vertex'], ['==', '${'$'}type', 'Point']],
-                        'paint': {
-                            'circle-radius': 5,
-                            'circle-color': '#fff',
-                            'circle-stroke-width': 2,
-                            'circle-stroke-color': '#3b82f6'
-                        }
-                    }
-                ]
-            });
-
-            map.addControl(draw);
-
-            // Add navigation controls
-            map.addControl(new maplibregl.NavigationControl(), 'bottom-left');
-
-            // Map events
-            map.on('draw.create', updateGeoJson);
-            map.on('draw.delete', updateGeoJson);
-            map.on('draw.update', updateGeoJson);
-            map.on('draw.selectionchange', handleSelectionChange);
-
-            map.on('click', (e) => {
-                const features = map.queryRenderedFeatures(e.point, {
-                    layers: ['gl-draw-polygon-fill', 'gl-draw-line', 'gl-draw-point']
-                });
-
-                if (features.length > 0 && draw.getMode() === 'simple_select') {
-                    const feature = features[0];
-                    selectedFeatureId = feature.id;
-                    showPropertiesPanel(feature);
-                }
-            });
+        // Theme values
+        val basemapStyle = if (isDark) {
+            "https://tiles.basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+        } else {
+            "https://tiles.basemaps.cartocdn.com/gl/positron-gl-style/style.json"
         }
 
-        function setDrawMode(mode) {
-            // Remove active state from all buttons
-            document.querySelectorAll('button[id$="-btn"]').forEach(btn => {
-                btn.classList.remove('bg-blue-600', 'text-white');
-                btn.classList.add('bg-white', 'text-gray-700');
-            });
+        // Theme colors
+        val bgColor = if (isDark) "#2B2B2B" else "#FFFFFF"
+        val borderColor = if (isDark) "#3C3F41" else "#D1D5DB"
+        val textColor = if (isDark) "#BBBBBB" else "#374151"
+        val hoverBg = if (isDark) "#3C3F41" else "#F3F4F6"
+        val activeBg = if (isDark) "#4A88C7" else "#3B82F6"
+        val panelBg = if (isDark) "#313335" else "#FFFFFF"
+        val panelBorder = if (isDark) "#3C3F41" else "#E5E7EB"
+        val labelColor = if (isDark) "#888" else "#6B7280"
+        val iconFilter = if (isDark) "invert(0.8)" else "none"
+        val attribBg = if (isDark) "rgba(43, 43, 43, 0.8)" else "rgba(255, 255, 255, 0.8)"
+        val linkColor = if (isDark) "#4A88C7" else "#3B82F6"
+        val closeButtonColor = if (isDark) "#888" else "#999"
 
-            switch(mode) {
-                case 'select':
-                    draw.changeMode('simple_select');
-                    document.getElementById('select-btn').classList.add('bg-blue-600', 'text-white');
-                    document.getElementById('select-btn').classList.remove('bg-white', 'text-gray-700');
-                    break;
-                case 'point':
-                    draw.changeMode('draw_point');
-                    document.getElementById('point-btn').classList.add('bg-blue-600', 'text-white');
-                    document.getElementById('point-btn').classList.remove('bg-white', 'text-gray-700');
-                    break;
-                case 'line':
-                    draw.changeMode('draw_line_string');
-                    document.getElementById('line-btn').classList.add('bg-blue-600', 'text-white');
-                    document.getElementById('line-btn').classList.remove('bg-white', 'text-gray-700');
-                    break;
-                case 'polygon':
-                    draw.changeMode('draw_polygon');
-                    document.getElementById('polygon-btn').classList.add('bg-blue-600', 'text-white');
-                    document.getElementById('polygon-btn').classList.remove('bg-white', 'text-gray-700');
-                    break;
-            }
-        }
-
-        function handleSelectionChange(e) {
-            if (e.features.length > 0) {
-                selectedFeatureId = e.features[0].id;
-                document.getElementById('delete-btn').disabled = false;
-                showPropertiesPanel(e.features[0]);
-            } else {
-                selectedFeatureId = null;
-                document.getElementById('delete-btn').disabled = true;
-                hidePropertiesPanel();
-            }
-        }
-
-        function showPropertiesPanel(feature) {
-            const panel = document.getElementById('properties-panel');
-            const content = document.getElementById('properties-content');
-
-            const geometryType = feature.geometry.type;
-            let html = '<div class="mb-4">';
-            html += '<div class="text-xs font-medium text-gray-500 mb-1">Geometry Type</div>';
-            html += '<div class="text-sm text-gray-900">' + geometryType + '</div>';
-            html += '</div>';
-
-            const properties = feature.properties || {};
-
-            html += '<div class="mb-4">';
-            html += '<label class="block text-xs font-medium text-gray-700 mb-2">Properties (JSON)</label>';
-            html += '<textarea id="properties-json" rows="10" ';
-            html += 'class="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" ';
-            html += 'placeholder="{}"></textarea>';
-            html += '<div id="json-error" class="mt-1 text-xs text-red-600 hidden"></div>';
-            html += '<button id="save-properties" class="mt-2 w-full px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">';
-            html += 'Save Properties';
-            html += '</button>';
-            html += '</div>';
-
-            html += '<div class="border-t pt-4">';
-            html += '<div class="text-xs font-medium text-gray-700 mb-2">Quick Actions</div>';
-            html += '<button id="delete-feature" class="w-full px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500">';
-            html += 'Delete Feature';
-            html += '</button>';
-            html += '</div>';
-
-            content.innerHTML = html;
-
-            // Set the textarea value with formatted JSON
-            const textarea = document.getElementById('properties-json');
-            try {
-                textarea.value = JSON.stringify(properties, null, 2);
-            } catch (e) {
-                textarea.value = '{}';
-            }
-
-            // Add event listener for save button
-            document.getElementById('save-properties').addEventListener('click', () => {
-                saveFeatureProperties();
-            });
-
-            // Add event listener for delete button
-            document.getElementById('delete-feature').addEventListener('click', () => {
-                deleteSelectedFeature();
-            });
-
-            // Real-time JSON validation
-            textarea.addEventListener('input', () => {
-                const errorDiv = document.getElementById('json-error');
-                try {
-                    JSON.parse(textarea.value);
-                    errorDiv.classList.add('hidden');
-                    errorDiv.textContent = '';
-                    textarea.classList.remove('border-red-500');
-                } catch (e) {
-                    errorDiv.classList.remove('hidden');
-                    errorDiv.textContent = 'Invalid JSON: ' + e.message;
-                    textarea.classList.add('border-red-500');
-                }
-            });
-
-            panel.classList.remove('hidden');
-        }
-
-        function saveFeatureProperties() {
-            if (!selectedFeatureId) return;
-
-            const textarea = document.getElementById('properties-json');
-            const errorDiv = document.getElementById('json-error');
-
-            try {
-                const properties = JSON.parse(textarea.value);
-                const feature = draw.get(selectedFeatureId);
-
-                if (feature) {
-                    feature.properties = properties;
-                    draw.add(feature);
-                    updateGeoJson();
-
-                    // Show success feedback
-                    errorDiv.classList.remove('hidden');
-                    errorDiv.classList.remove('text-red-600');
-                    errorDiv.classList.add('text-green-600');
-                    errorDiv.textContent = 'Properties saved successfully!';
-                    textarea.classList.remove('border-red-500');
-
-                    setTimeout(() => {
-                        errorDiv.classList.add('hidden');
-                        errorDiv.classList.remove('text-green-600');
-                        errorDiv.classList.add('text-red-600');
-                    }, 2000);
-                }
-            } catch (e) {
-                errorDiv.classList.remove('hidden');
-                errorDiv.textContent = 'Invalid JSON: ' + e.message;
-                textarea.classList.add('border-red-500');
-            }
-        }
-
-        function deleteSelectedFeature() {
-            if (selectedFeatureId) {
-                draw.delete([selectedFeatureId]);
-                selectedFeatureId = null;
-                document.getElementById('delete-btn').disabled = true;
-                hidePropertiesPanel();
-                updateGeoJson();
-            }
-        }
-
-        function hidePropertiesPanel() {
-            document.getElementById('properties-panel').classList.add('hidden');
-        }
-
-        function deleteSelected() {
-            const selected = draw.getSelected();
-            if (selected.features.length > 0) {
-                const ids = selected.features.map(f => f.id);
-                draw.delete(ids);
-                selectedFeatureId = null;
-                document.getElementById('delete-btn').disabled = true;
-                hidePropertiesPanel();
-            }
-        }
-
-        function updateGeoJson() {
-            const data = draw.getAll();
-            currentFeatureCollection = data;
-
-            if (window.updateGeoJsonFromMap) {
-                window.updateGeoJsonFromMap(data);
-            }
-        }
-
-        window.loadGeoJson = function(geoJsonData) {
-            try {
-                if (!geoJsonData || (!geoJsonData['type'])) {
-                    return;
-                }
-
-                // Clear existing features
-                draw.deleteAll();
-
-                // Load new features
-                if (geoJsonData.type === 'FeatureCollection') {
-                    if (geoJsonData.features && geoJsonData.features.length > 0) {
-                        draw.add(geoJsonData);
-
-                        // Fit bounds to features - use proper bounds calculation
-                        const bounds = new maplibregl.LngLatBounds();
-
-                        function addCoordinatesToBounds(coords, geomType) {
-                            if (geomType === 'Point') {
-                                bounds.extend(coords);
-                            } else if (geomType === 'LineString') {
-                                coords.forEach(coord => bounds.extend(coord));
-                            } else if (geomType === 'Polygon') {
-                                coords.forEach(ring => {
-                                    ring.forEach(coord => bounds.extend(coord));
-                                });
-                            } else if (geomType === 'MultiPoint') {
-                                coords.forEach(coord => bounds.extend(coord));
-                            } else if (geomType === 'MultiLineString') {
-                                coords.forEach(line => {
-                                    line.forEach(coord => bounds.extend(coord));
-                                });
-                            } else if (geomType === 'MultiPolygon') {
-                                coords.forEach(polygon => {
-                                    polygon.forEach(ring => {
-                                        ring.forEach(coord => bounds.extend(coord));
-                                    });
-                                });
-                            }
-                        }
-
-                        geoJsonData.features.forEach(feature => {
-                            if (feature.geometry && feature.geometry.coordinates) {
-                                addCoordinatesToBounds(feature.geometry.coordinates, feature.geometry.type);
-                            }
-                        });
-
-                        if (!bounds.isEmpty()) {
-                            map.fitBounds(bounds, { padding: 50, duration: 0 });
-                        }
-                    }
-                } else if (geoJsonData.type === 'Feature') {
-                    draw.add(geoJsonData);
-
-                    if (geoJsonData.geometry && geoJsonData.geometry.coordinates) {
-                        const coords = geoJsonData.geometry.coordinates;
-                        if (geoJsonData.geometry.type === 'Point') {
-                            map.jumpTo({ center: coords});
-                        } else {
-                            // Calculate bounds for non-point geometries
-                            const bounds = new maplibregl.LngLatBounds();
-                            const geomType = geoJsonData.geometry.type;
-
-                            if (geomType === 'LineString') {
-                                coords.forEach(coord => bounds.extend(coord));
-                            } else if (geomType === 'Polygon') {
-                                coords.forEach(ring => {
-                                    ring.forEach(coord => bounds.extend(coord));
-                                });
-                            }
-
-                            if (!bounds.isEmpty()) {
-                                map.fitBounds(bounds, { padding: 50, duration: 0 });
-                            }
-                        }
-                    }
-                }
-
-                currentFeatureCollection = draw.getAll();
-            } catch (e) {
-                console.error('Error loading GeoJSON:', e);
-            }
-        };
-
-        // Button event listeners
-        document.getElementById('select-btn').addEventListener('click', () => setDrawMode('select'));
-        document.getElementById('point-btn').addEventListener('click', () => setDrawMode('point'));
-        document.getElementById('line-btn').addEventListener('click', () => setDrawMode('line'));
-        document.getElementById('polygon-btn').addEventListener('click', () => setDrawMode('polygon'));
-        document.getElementById('delete-btn').addEventListener('click', deleteSelected);
-        document.getElementById('close-panel').addEventListener('click', () => {
-            hidePropertiesPanel();
-            draw.changeMode('simple_select');
-        });
-
-        // Initialize map on load
-        initMap();
-        setDrawMode('select');
-    </script>
-</body>
-</html>
-        """.trimIndent()
+        // Replace placeholders with actual values
+        return htmlTemplate
+            .replace("{{BASEMAP_STYLE}}", basemapStyle)
+            .replace("{{BG_COLOR}}", bgColor)
+            .replace("{{BORDER_COLOR}}", borderColor)
+            .replace("{{TEXT_COLOR}}", textColor)
+            .replace("{{HOVER_BG}}", hoverBg)
+            .replace("{{ACTIVE_BG}}", activeBg)
+            .replace("{{PANEL_BG}}", panelBg)
+            .replace("{{PANEL_BORDER}}", panelBorder)
+            .replace("{{LABEL_COLOR}}", labelColor)
+            .replace("{{ICON_FILTER}}", iconFilter)
+            .replace("{{ATTRIB_BG}}", attribBg)
+            .replace("{{LINK_COLOR}}", linkColor)
+            .replace("{{CLOSE_BUTTON_COLOR}}", closeButtonColor)
     }
 
     override fun dispose() {

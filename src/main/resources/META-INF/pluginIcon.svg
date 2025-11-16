@@ -1,12 +1,43 @@
 <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M32.0845 7.94025V4H24.0203V7.9896H16.029V4H7.91553V7.94025H4V36H16.0044V32.0045C16.0058 30.9457 16.4274 29.9308 17.1766 29.1826C17.9258 28.4345 18.9412 28.0143 20 28.0143C21.0588 28.0143 22.0743 28.4345 22.8234 29.1826C23.5726 29.9308 23.9942 30.9457 23.9956 32.0045V36H36V7.94025H32.0845Z"
-          fill="url(#paint0_linear)"/>
+    <!-- Background Square with JetBrains-style gradient -->
+    <rect width="40" height="40" rx="4" fill="url(#paint0_linear)"/>
+
+    <!-- Map Layer Lines -->
+    <path d="M8 14L15 11L25 15L32 12V28L25 31L15 27L8 30V14Z"
+          fill="url(#paint1_linear)"
+          opacity="0.6"/>
+
+    <!-- Map Fold Lines -->
+    <line x1="15" y1="11" x2="15" y2="27" stroke="white" stroke-width="1.5" opacity="0.6"/>
+    <line x1="25" y1="15" x2="25" y2="31" stroke="white" stroke-width="1.5" opacity="0.6"/>
+
+    <!-- Location Pin -->
+    <circle cx="20" cy="18" r="5" fill="white"/>
+    <circle cx="20" cy="18" r="3" fill="url(#paint2_radial)"/>
+    <path d="M20 23L20 28" stroke="white" stroke-width="2" stroke-linecap="round"/>
+
+    <!-- JetBrains-style label box (bottom left) -->
+    <rect x="4" y="29" width="10" height="7" fill="black" opacity="0.9"/>
+    <text x="5.5" y="34.5" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="white">JB</text>
+
     <defs>
-        <linearGradient id="paint0_linear" x1="2.94192" y1="4.89955" x2="37.7772" y2="39.7345"
-                        gradientUnits="userSpaceOnUse">
-            <stop offset="0.15937" stop-color="#3BEA62"/>
-            <stop offset="0.5404" stop-color="#3C99CC"/>
-            <stop offset="0.93739" stop-color="#6B57FF"/>
+        <!-- Main JetBrains-inspired gradient -->
+        <linearGradient id="paint0_linear" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#3BEA62"/>
+            <stop offset="50%" stop-color="#3C99CC"/>
+            <stop offset="100%" stop-color="#6B57FF"/>
         </linearGradient>
+
+        <!-- Map layer gradient -->
+        <linearGradient id="paint1_linear" x1="8" y1="14" x2="32" y2="28" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="gray" stop-opacity="1"/>
+            <stop offset="100%" stop-color="white" stop-opacity="0.6"/>
+        </linearGradient>
+
+        <!-- Pin center gradient -->
+        <radialGradient id="paint2_radial" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(20 18) scale(3)">
+            <stop offset="0%" stop-color="#FF4757"/>
+            <stop offset="100%" stop-color="#FF6348"/>
+        </radialGradient>
     </defs>
 </svg>

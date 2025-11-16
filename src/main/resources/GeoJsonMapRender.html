@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>GeoJSON Map Editor</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+    <script src="https://unpkg.com/@mapbox/mapbox-gl-draw@1.4.3/dist/mapbox-gl-draw.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/@mapbox/mapbox-gl-draw@1.4.3/dist/mapbox-gl-draw.css">
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: {{BG_COLOR}};
+        }
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+        .maplibregl-ctrl-top-left {
+            top: 50px;
+        }
+
+        /* Theme navigation controls */
+        .maplibregl-ctrl-group {
+            background-color: {{BG_COLOR}} !important;
+            border: 1px solid {{BORDER_COLOR}} !important;
+        }
+        .maplibregl-ctrl-group button {
+            background-color: {{BG_COLOR}} !important;
+            border-color: {{BORDER_COLOR}} !important;
+        }
+        .maplibregl-ctrl-group button:hover {
+            background-color: {{HOVER_BG}} !important;
+        }
+        .maplibregl-ctrl-icon {
+            filter: {{ICON_FILTER}};
+        }
+
+        /* Theme attribution */
+        .maplibregl-ctrl-attrib {
+            background-color: {{ATTRIB_BG}} !important;
+            color: {{TEXT_COLOR}} !important;
+        }
+        .maplibregl-ctrl-attrib a {
+            color: {{LINK_COLOR}} !important;
+        }
+
+        .toolbar-btn {
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: {{BG_COLOR}};
+            border: 1px solid {{BORDER_COLOR}};
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .toolbar-btn:hover {
+            background-color: {{HOVER_BG}};
+        }
+        .toolbar-btn.active {
+            background-color: {{ACTIVE_BG}};
+            border-color: {{ACTIVE_BG}};
+        }
+        .toolbar-btn.active svg {
+            stroke: white;
+            fill: white;
+        }
+        .toolbar-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .toolbar-btn svg {
+            width: 20px;
+            height: 20px;
+            stroke: {{TEXT_COLOR}};
+            fill: none;
+        }
+        .toolbar-btn.delete svg {
+            fill: #DC2626;
+            stroke: none;
+        }
+        .toolbar-btn.delete.active svg {
+            fill: white;
+        }
+    </style>
+</head>
+<body>
+    <div style="position: relative; width: 100%; height: 100%;">
+        <!-- Toolbar -->
+        <div style="position: absolute; top: 0; left: 0; right: 0; z-index: 10; background-color: {{BG_COLOR}}; border-bottom: 1px solid {{BORDER_COLOR}}; padding: 8px; display: flex; gap: 8px; align-items: center;">
+            <button id="select-btn" class="toolbar-btn active" title="Select">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/>
+                </svg>
+            </button>
+            <button id="point-btn" class="toolbar-btn" title="Add Point">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <circle cx="12" cy="12" r="3" fill="currentColor"/>
+                </svg>
+            </button>
+            <button id="line-btn" class="toolbar-btn" title="Add LineString">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <path d="M5 12h14"/>
+                    <circle cx="5" cy="12" r="2" fill="currentColor"/>
+                    <circle cx="19" cy="12" r="2" fill="currentColor"/>
+                </svg>
+            </button>
+            <button id="polygon-btn" class="toolbar-btn" title="Add Polygon">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <path d="M12 2L2 19h20L12 2z"/>
+                </svg>
+            </button>
+            <div style="width: 1px; height: 24px; background-color: {{BORDER_COLOR}};"></div>
+            <button id="delete-btn" class="toolbar-btn delete" title="Delete" disabled>
+                <svg viewBox="0 0 24 24">
+                    <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z" stroke-width="2" fill="none" stroke="currentColor"/>
+                </svg>
+            </button>
+        </div>
+
+        <!-- Map Container -->
+        <div id="map" style="padding-top: 50px;"></div>
+
+        <!-- Properties Panel -->
+        <div id="properties-panel" style="display: none; position: absolute; top: 58px; right: 8px; width: 320px; max-height: calc(100vh - 70px); background-color: {{PANEL_BG}}; border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); border: 1px solid {{PANEL_BORDER}}; overflow: hidden;">
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid {{PANEL_BORDER}};">
+                <h3 style="font-size: 14px; font-weight: 600; color: {{TEXT_COLOR}}; margin: 0;">Feature Properties</h3>
+                <button id="close-panel" style="background: none; border: none; cursor: pointer; padding: 4px; color: {{CLOSE_BUTTON_COLOR}};">
+                    <svg style="width: 20px; height: 20px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div id="properties-content" style="padding: 12px; overflow-y: auto; max-height: calc(100vh - 140px);"></div>
+        </div>
+    </div>
+
+    <script>
+        let map, draw, currentFeatureCollection;
+        let selectedFeatureId = null;
+
+        function initMap() {
+            // Initialize MapLibre GL map with Positron (light/dark based on theme)
+            map = new maplibregl.Map({
+                container: 'map',
+                style: '{{BASEMAP_STYLE}}',
+                center: [0, 20],
+                zoom: 2,
+                fadeDuration: 0,
+                renderWorldCopies: false
+            });
+
+            // Initialize MapBox GL Draw
+            draw = new MapboxDraw({
+                displayControlsDefault: false,
+                controls: {},
+                styles: [
+                    // Point style
+                    {
+                        'id': 'gl-draw-point',
+                        'type': 'circle',
+                        'filter': ['all', ['==', '$type', 'Point'], ['!=', 'mode', 'static']],
+                        'paint': {
+                            'circle-radius': 6,
+                            'circle-color': '#3b82f6'
+                        }
+                    },
+                    // Line style
+                    {
+                        'id': 'gl-draw-line',
+                        'type': 'line',
+                        'filter': ['all', ['==', '$type', 'LineString'], ['!=', 'mode', 'static']],
+                        'layout': {
+                            'line-cap': 'round',
+                            'line-join': 'round'
+                        },
+                        'paint': {
+                            'line-color': '#3b82f6',
+                            'line-width': 3
+                        }
+                    },
+                    // Polygon fill
+                    {
+                        'id': 'gl-draw-polygon-fill',
+                        'type': 'fill',
+                        'filter': ['all', ['==', '$type', 'Polygon'], ['!=', 'mode', 'static']],
+                        'paint': {
+                            'fill-color': '#3b82f6',
+                            'fill-opacity': 0.2
+                        }
+                    },
+                    // Polygon outline
+                    {
+                        'id': 'gl-draw-polygon-stroke',
+                        'type': 'line',
+                        'filter': ['all', ['==', '$type', 'Polygon'], ['!=', 'mode', 'static']],
+                        'layout': {
+                            'line-cap': 'round',
+                            'line-join': 'round'
+                        },
+                        'paint': {
+                            'line-color': '#3b82f6',
+                            'line-width': 3
+                        }
+                    },
+                    // Vertex points
+                    {
+                        'id': 'gl-draw-polygon-and-line-vertex-active',
+                        'type': 'circle',
+                        'filter': ['all', ['==', 'meta', 'vertex'], ['==', '$type', 'Point']],
+                        'paint': {
+                            'circle-radius': 5,
+                            'circle-color': '#fff',
+                            'circle-stroke-width': 2,
+                            'circle-stroke-color': '#3b82f6'
+                        }
+                    }
+                ]
+            });
+
+            map.addControl(draw);
+
+            // Add navigation controls
+            map.addControl(new maplibregl.NavigationControl(), 'bottom-left');
+
+            // Map events
+            map.on('draw.create', updateGeoJson);
+            map.on('draw.delete', updateGeoJson);
+            map.on('draw.update', updateGeoJson);
+            map.on('draw.selectionchange', handleSelectionChange);
+
+            map.on('click', (e) => {
+                const features = map.queryRenderedFeatures(e.point, {
+                    layers: ['gl-draw-polygon-fill', 'gl-draw-line', 'gl-draw-point']
+                });
+
+                if (features.length > 0 && draw.getMode() === 'simple_select') {
+                    const feature = features[0];
+                    selectedFeatureId = feature.id;
+                    showPropertiesPanel(feature);
+                }
+            });
+        }
+
+        function setDrawMode(mode) {
+            // Remove active state from all buttons
+            document.querySelectorAll('.toolbar-btn:not(.delete)').forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            switch(mode) {
+                case 'select':
+                    draw.changeMode('simple_select');
+                    document.getElementById('select-btn').classList.add('active');
+                    break;
+                case 'point':
+                    draw.changeMode('draw_point');
+                    document.getElementById('point-btn').classList.add('active');
+                    break;
+                case 'line':
+                    draw.changeMode('draw_line_string');
+                    document.getElementById('line-btn').classList.add('active');
+                    break;
+                case 'polygon':
+                    draw.changeMode('draw_polygon');
+                    document.getElementById('polygon-btn').classList.add('active');
+                    break;
+            }
+        }
+
+        function handleSelectionChange(e) {
+            if (e.features.length > 0) {
+                selectedFeatureId = e.features[0].id;
+                document.getElementById('delete-btn').disabled = false;
+                showPropertiesPanel(e.features[0]);
+
+                // Notify Kotlin to scroll code to this feature
+                if (window.notifyFeatureSelected) {
+                    window.notifyFeatureSelected(selectedFeatureId);
+                }
+            } else {
+                selectedFeatureId = null;
+                document.getElementById('delete-btn').disabled = true;
+                hidePropertiesPanel();
+            }
+        }
+
+        function showPropertiesPanel(feature) {
+            const panel = document.getElementById('properties-panel');
+            const content = document.getElementById('properties-content');
+
+            const geometryType = feature.geometry.type;
+            let html = '<div style="margin-bottom: 16px;">';
+            html += '<div style="font-size: 12px; font-weight: 500; color: {{LABEL_COLOR}}; margin-bottom: 4px;">Geometry Type</div>';
+            html += '<div style="font-size: 14px; color: {{TEXT_COLOR}};">' + geometryType + '</div>';
+            html += '</div>';
+
+            const properties = feature.properties || {};
+
+            html += '<div style="margin-bottom: 16px;">';
+            html += '<label style="display: block; font-size: 12px; font-weight: 500; color: {{TEXT_COLOR}}; margin-bottom: 8px;">Properties (JSON)</label>';
+            html += '<textarea id="properties-json" rows="10" ';
+            html += 'style="width: 100%; padding: 8px; font-size: 13px; font-family: monospace; border: 1px solid {{BORDER_COLOR}}; border-radius: 4px; background-color: {{BG_COLOR}}; color: {{TEXT_COLOR}}; resize: vertical;" ';
+            html += 'placeholder="{}"></textarea>';
+            html += '<div id="json-error" style="margin-top: 4px; font-size: 12px; color: #DC2626; display: none;"></div>';
+            html += '<button id="save-properties" style="margin-top: 8px; width: 100%; padding: 8px 16px; font-size: 13px; font-weight: 500; color: white; background-color: {{ACTIVE_BG}}; border: none; border-radius: 4px; cursor: pointer;">';
+            html += 'Save Properties';
+            html += '</button>';
+            html += '</div>';
+
+            html += '<div style="border-top: 1px solid {{PANEL_BORDER}}; padding-top: 16px;">';
+            html += '<div style="font-size: 12px; font-weight: 500; color: {{TEXT_COLOR}}; margin-bottom: 8px;">Quick Actions</div>';
+            html += '<button id="delete-feature" style="width: 100%; padding: 8px 16px; font-size: 13px; font-weight: 500; color: white; background-color: #DC2626; border: none; border-radius: 4px; cursor: pointer;">';
+            html += 'Delete Feature';
+            html += '</button>';
+            html += '</div>';
+
+            content.innerHTML = html;
+
+            // Set the textarea value with formatted JSON
+            const textarea = document.getElementById('properties-json');
+            try {
+                textarea.value = JSON.stringify(properties, null, 2);
+            } catch (e) {
+                textarea.value = '{}';
+            }
+
+            // Add event listener for save button
+            document.getElementById('save-properties').addEventListener('click', () => {
+                saveFeatureProperties();
+            });
+
+            // Add event listener for delete button
+            document.getElementById('delete-feature').addEventListener('click', () => {
+                deleteSelectedFeature();
+            });
+
+            // Real-time JSON validation
+            textarea.addEventListener('input', () => {
+                const errorDiv = document.getElementById('json-error');
+                try {
+                    JSON.parse(textarea.value);
+                    errorDiv.style.display = 'none';
+                    errorDiv.textContent = '';
+                    textarea.style.borderColor = '{{BORDER_COLOR}}';
+                } catch (e) {
+                    errorDiv.style.display = 'block';
+                    errorDiv.textContent = 'Invalid JSON: ' + e.message;
+                    textarea.style.borderColor = '#DC2626';
+                }
+            });
+
+            panel.style.display = 'block';
+        }
+
+        function saveFeatureProperties() {
+            if (!selectedFeatureId) return;
+
+            const textarea = document.getElementById('properties-json');
+            const errorDiv = document.getElementById('json-error');
+
+            try {
+                const properties = JSON.parse(textarea.value);
+                const feature = draw.get(selectedFeatureId);
+
+                if (feature) {
+                    feature.properties = properties;
+                    draw.add(feature);
+                    updateGeoJson();
+
+                    // Show success feedback
+                    errorDiv.style.display = 'block';
+                    errorDiv.style.color = '#10B981';
+                    errorDiv.textContent = 'Properties saved successfully!';
+
+                    setTimeout(() => {
+                        errorDiv.style.display = 'none';
+                        errorDiv.style.color = '#DC2626';
+                    }, 2000);
+                }
+            } catch (e) {
+                errorDiv.style.display = 'block';
+                errorDiv.textContent = 'Invalid JSON: ' + e.message;
+                textarea.style.borderColor = '#DC2626';
+            }
+        }
+
+        function deleteSelectedFeature() {
+            if (selectedFeatureId) {
+                draw.delete([selectedFeatureId]);
+                selectedFeatureId = null;
+                document.getElementById('delete-btn').disabled = true;
+                hidePropertiesPanel();
+                updateGeoJson();
+            }
+        }
+
+        function hidePropertiesPanel() {
+            document.getElementById('properties-panel').style.display = 'none';
+        }
+
+        function deleteSelected() {
+            const selected = draw.getSelected();
+            if (selected.features.length > 0) {
+                const ids = selected.features.map(f => f.id);
+                draw.delete(ids);
+                selectedFeatureId = null;
+                document.getElementById('delete-btn').disabled = true;
+                hidePropertiesPanel();
+            }
+        }
+
+        function updateGeoJson() {
+            const data = draw.getAll();
+            currentFeatureCollection = data;
+
+            if (window.updateGeoJsonFromMap) {
+                window.updateGeoJsonFromMap(data);
+            }
+        }
+
+        // Function to pan to a feature by its index in the feature array
+        window.panToFeatureByIndex = function(featureIndex) {
+            try {
+                const allFeatures = draw.getAll();
+                if (!allFeatures || !allFeatures.features || featureIndex >= allFeatures.features.length) {
+                    return;
+                }
+
+                const feature = allFeatures.features[featureIndex];
+                if (!feature || !feature.geometry || !feature.geometry.coordinates) {
+                    return;
+                }
+
+                const coords = feature.geometry.coordinates;
+                const geomType = feature.geometry.type;
+                const bounds = new maplibregl.LngLatBounds();
+
+                function addCoordinatesToBounds(coords, geomType) {
+                    if (geomType === 'Point') {
+                        bounds.extend(coords);
+                    } else if (geomType === 'LineString') {
+                        coords.forEach(coord => bounds.extend(coord));
+                    } else if (geomType === 'Polygon') {
+                        coords.forEach(ring => {
+                            ring.forEach(coord => bounds.extend(coord));
+                        });
+                    }
+                }
+
+                addCoordinatesToBounds(coords, geomType);
+
+                if (!bounds.isEmpty()) {
+                    map.fitBounds(bounds, { padding: 100, duration: 300 });
+                } else if (geomType === 'Point') {
+                    map.flyTo({ center: coords, zoom: 14, duration: 300 });
+                }
+            } catch (e) {
+                console.error('Error panning to feature:', e);
+            }
+        };
+
+        window.loadGeoJson = function(geoJsonData) {
+            try {
+                if (!geoJsonData || (!geoJsonData['type'])) {
+                    return;
+                }
+
+                // Clear existing features
+                draw.deleteAll();
+
+                // Load new features
+                if (geoJsonData.type === 'FeatureCollection') {
+                    if (geoJsonData.features && geoJsonData.features.length > 0) {
+                        draw.add(geoJsonData);
+
+                        // Fit bounds to features - use proper bounds calculation
+                        const bounds = new maplibregl.LngLatBounds();
+
+                        function addCoordinatesToBounds(coords, geomType) {
+                            if (geomType === 'Point') {
+                                bounds.extend(coords);
+                            } else if (geomType === 'LineString') {
+                                coords.forEach(coord => bounds.extend(coord));
+                            } else if (geomType === 'Polygon') {
+                                coords.forEach(ring => {
+                                    ring.forEach(coord => bounds.extend(coord));
+                                });
+                            } else if (geomType === 'MultiPoint') {
+                                coords.forEach(coord => bounds.extend(coord));
+                            } else if (geomType === 'MultiLineString') {
+                                coords.forEach(line => {
+                                    line.forEach(coord => bounds.extend(coord));
+                                });
+                            } else if (geomType === 'MultiPolygon') {
+                                coords.forEach(polygon => {
+                                    polygon.forEach(ring => {
+                                        ring.forEach(coord => bounds.extend(coord));
+                                    });
+                                });
+                            }
+                        }
+
+                        geoJsonData.features.forEach(feature => {
+                            if (feature.geometry && feature.geometry.coordinates) {
+                                addCoordinatesToBounds(feature.geometry.coordinates, feature.geometry.type);
+                            }
+                        });
+
+                        if (!bounds.isEmpty()) {
+                            map.fitBounds(bounds, { padding: 50, duration: 0 });
+                        }
+                    }
+                } else if (geoJsonData.type === 'Feature') {
+                    draw.add(geoJsonData);
+
+                    if (geoJsonData.geometry && geoJsonData.geometry.coordinates) {
+                        const coords = geoJsonData.geometry.coordinates;
+                        if (geoJsonData.geometry.type === 'Point') {
+                            map.jumpTo({ center: coords});
+                        } else {
+                            // Calculate bounds for non-point geometries
+                            const bounds = new maplibregl.LngLatBounds();
+                            const geomType = geoJsonData.geometry.type;
+
+                            if (geomType === 'LineString') {
+                                coords.forEach(coord => bounds.extend(coord));
+                            } else if (geomType === 'Polygon') {
+                                coords.forEach(ring => {
+                                    ring.forEach(coord => bounds.extend(coord));
+                                });
+                            }
+
+                            if (!bounds.isEmpty()) {
+                                map.fitBounds(bounds, { padding: 50, duration: 0 });
+                            }
+                        }
+                    }
+                }
+
+                currentFeatureCollection = draw.getAll();
+            } catch (e) {
+                console.error('Error loading GeoJSON:', e);
+            }
+        };
+
+        // Button event listeners
+        document.getElementById('select-btn').addEventListener('click', () => setDrawMode('select'));
+        document.getElementById('point-btn').addEventListener('click', () => setDrawMode('point'));
+        document.getElementById('line-btn').addEventListener('click', () => setDrawMode('line'));
+        document.getElementById('polygon-btn').addEventListener('click', () => setDrawMode('polygon'));
+        document.getElementById('delete-btn').addEventListener('click', deleteSelected);
+        document.getElementById('close-panel').addEventListener('click', () => {
+            hidePropertiesPanel();
+            draw.changeMode('simple_select');
+        });
+
+        // Initialize map on load
+        initMap();
+        setDrawMode('select');
+    </script>
+</body>
+</html>
