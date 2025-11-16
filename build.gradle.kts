@@ -36,7 +36,7 @@ intellijPlatform {
         }
 
         changeNotes = """
-            Initial version
+            Map light + dark mode, focus to feature + sync with code view
         """.trimIndent()
     }
 }
